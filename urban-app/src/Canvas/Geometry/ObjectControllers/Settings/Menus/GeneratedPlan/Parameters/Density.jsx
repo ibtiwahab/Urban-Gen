@@ -1,25 +1,61 @@
 import React, { useState, useEffect } from 'react';
+import GeometryService from '../../../../../../Services/GeometryService';
 
 export default function Density({ polylineController, addCallback, removeCallback }) {
     const parameters = polylineController.generatedPlanController?.parameters;
     const [value, setValue] = useState(parameters ? parameters.density : 0.5);
     const [changed, setChanged] = useState(false);
     const [geometryInfo, setGeometryInfo] = useState(null);
+    const [validationInfo, setValidationInfo] = useState(null);
     const [estimatedBuildings, setEstimatedBuildings] = useState(0);
+    const [geometryQuality, setGeometryQuality] = useState(0);
+    const [backendConnected, setBackendConnected] = useState(true);
 
     useEffect(() => {
         // Get geometry information when component mounts
         const info = polylineController.geometryInfo;
+        const validation = polylineController.validationInfo;
+        
         setGeometryInfo(info);
+        setValidationInfo(validation);
+        
+        if (validation) {
+            const quality = GeometryService.getGeometryQualityScore(validation);
+            setGeometryQuality(quality);
+        }
         
         if (info && info.area) {
-            // Estimate number of buildings based on density and area
-            const buildingFootprint = 300; // Base building area
-            const maxBuildings = Math.floor(info.area / (buildingFootprint * 2));
-            const estimated = Math.max(1, Math.floor(maxBuildings * value));
-            setEstimatedBuildings(estimated);
+            calculateEstimatedBuildings(info.area, value);
         }
+
+        // Test backend connectivity
+        testBackendConnection();
     }, [value, polylineController]);
+
+    const testBackendConnection = async () => {
+        try {
+            const connectionStatus = await GeometryService.testConnection();
+            setBackendConnected(connectionStatus.connected);
+        } catch (error) {
+            setBackendConnected(false);
+        }
+    };
+
+    const calculateEstimatedBuildings = (area, density) => {
+        // Enhanced building estimation based on site type and parameters
+        const buildingParams = parameters?.getBuildingParameters() || {
+            base_width: 20,
+            base_depth: 15,
+            min_spacing: 5
+        };
+
+        const buildingFootprint = buildingParams.base_width * buildingParams.base_depth;
+        const totalBuildingSpace = buildingFootprint + (buildingParams.min_spacing * buildingParams.min_spacing);
+        const maxBuildings = Math.floor(area / totalBuildingSpace);
+        const estimated = Math.max(1, Math.floor(maxBuildings * density));
+        
+        setEstimatedBuildings(Math.min(estimated, 20)); // Cap at reasonable number
+    };
 
     const handleChange = (event) => {
         const newValue = parseFloat(event.target.value);
@@ -31,18 +67,28 @@ export default function Density({ polylineController, addCallback, removeCallbac
 
         // Update estimated buildings
         if (geometryInfo && geometryInfo.area) {
-            const buildingFootprint = 300;
-            const maxBuildings = Math.floor(geometryInfo.area / (buildingFootprint * 2));
-            const estimated = Math.max(1, Math.floor(maxBuildings * newValue));
-            setEstimatedBuildings(estimated);
+            calculateEstimatedBuildings(geometryInfo.area, newValue);
         }
 
         setChanged(true);
     };
 
-    const handleMouseUp = () => {
+    const handleMouseUp = async () => {
         if (parameters && changed && value != null) {
             parameters.density = value;
+            
+            // Refresh geometry analysis if validation is enabled
+            if (parameters.validate_geometry) {
+                await polylineController.refreshGeometryAnalysis();
+                const updatedValidation = polylineController.validationInfo;
+                setValidationInfo(updatedValidation);
+                
+                if (updatedValidation) {
+                    const quality = GeometryService.getGeometryQualityScore(updatedValidation);
+                    setGeometryQuality(quality);
+                }
+            }
+            
             polylineController.generatePlan(addCallback, removeCallback);
         }
 
@@ -65,11 +111,41 @@ export default function Density({ polylineController, addCallback, removeCallbac
         return "#F44336"; // Red
     };
 
+    const getQualityColor = (quality) => {
+        if (quality >= 90) return "#4CAF50"; // Green
+        if (quality >= 75) return "#8BC34A"; // Light Green
+        if (quality >= 60) return "#FFC107"; // Amber
+        if (quality >= 40) return "#FF9800"; // Orange
+        return "#F44336"; // Red
+    };
+
     const formatArea = (area) => {
-        if (area > 10000) {
-            return `${(area / 10000).toFixed(1)} ha`;
-        } else {
-            return `${area.toFixed(0)} m²`;
+        return GeometryService.formatArea(area);
+    };
+
+    const formatDistance = (distance) => {
+        return GeometryService.formatDistance(distance);
+    };
+
+    const refreshGeometry = async () => {
+        try {
+            await polylineController.refreshGeometryAnalysis();
+            const updatedInfo = polylineController.geometryInfo;
+            const updatedValidation = polylineController.validationInfo;
+            
+            setGeometryInfo(updatedInfo);
+            setValidationInfo(updatedValidation);
+            
+            if (updatedValidation) {
+                const quality = GeometryService.getGeometryQualityScore(updatedValidation);
+                setGeometryQuality(quality);
+            }
+            
+            if (updatedInfo && updatedInfo.area) {
+                calculateEstimatedBuildings(updatedInfo.area, value);
+            }
+        } catch (error) {
+            console.error('Failed to refresh geometry:', error);
         }
     };
 
@@ -88,6 +164,23 @@ export default function Density({ polylineController, addCallback, removeCallbac
                 marginBottom: '10px'
             }}
         >
+            {/* Backend Connection Status */}
+            {!backendConnected && (
+                <div style={{
+                    fontSize: '11px',
+                    color: '#F44336',
+                    backgroundColor: '#ffebee',
+                    padding: '6px',
+                    borderRadius: '4px',
+                    marginBottom: '10px',
+                    border: '1px solid #ffcdd2',
+                    textAlign: 'center'
+                }}>
+                    ⚠️ Backend disconnected - geometry features unavailable
+                </div>
+            )}
+
+            {/* Density Control */}
             <div style={{ marginBottom: '15px' }}>
                 <h4 style={{ 
                     margin: '0 0 10px 0',
@@ -127,6 +220,42 @@ export default function Density({ polylineController, addCallback, removeCallbac
                 />
             </div>
 
+            {/* Geometry Quality Indicator */}
+            {validationInfo && backendConnected && (
+                <div style={{ 
+                    fontSize: '12px', 
+                    color: '#333',
+                    backgroundColor: 'white',
+                    padding: '8px',
+                    borderRadius: '4px',
+                    marginBottom: '10px',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center'
+                }}>
+                    <div>
+                        <strong>Geometry Quality:</strong><br />
+                        <span style={{ color: getQualityColor(geometryQuality) }}>
+                            {geometryQuality}% - {GeometryService.getGeometryStatusDescription(validationInfo)}
+                        </span>
+                    </div>
+                    <button
+                        onClick={refreshGeometry}
+                        style={{
+                            fontSize: '10px',
+                            padding: '4px 8px',
+                            backgroundColor: '#007bff',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: 'pointer'
+                        }}
+                    >
+                        Refresh
+                    </button>
+                </div>
+            )}
+
             {/* Geometry Information */}
             {geometryInfo && (
                 <div style={{ 
@@ -144,9 +273,14 @@ export default function Density({ polylineController, addCallback, removeCallbac
                         </div>
                         <div>
                             <strong>Perimeter:</strong><br />
-                            {(geometryInfo.perimeter || 0).toFixed(0)} m
+                            {formatDistance(geometryInfo.perimeter || 0)}
                         </div>
                     </div>
+                    {geometryInfo.centroid && (
+                        <div style={{ marginTop: '8px', fontSize: '10px', color: '#888' }}>
+                            <strong>Centroid:</strong> ({geometryInfo.centroid.x?.toFixed(1)}, {geometryInfo.centroid.y?.toFixed(1)})
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -156,7 +290,8 @@ export default function Density({ polylineController, addCallback, removeCallbac
                 color: '#333',
                 backgroundColor: 'white',
                 padding: '8px',
-                borderRadius: '4px'
+                borderRadius: '4px',
+                marginBottom: '10px'
             }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
                     <div>
@@ -166,13 +301,60 @@ export default function Density({ polylineController, addCallback, removeCallbac
                         </span>
                     </div>
                     <div>
-                        <strong>Spacing:</strong><br />
-                        {parameters ? parameters.min_building_spacing.toFixed(1) : '5.0'} m
+                        <strong>Building Size:</strong><br />
+                        {parameters ? 
+                            `${parameters.getBuildingParameters().base_width.toFixed(0)}×${parameters.getBuildingParameters().base_depth.toFixed(0)}m` 
+                            : '20×15m'
+                        }
+                    </div>
+                </div>
+                <div style={{ marginTop: '8px' }}>
+                    <div>
+                        <strong>Min. Spacing:</strong> {parameters ? parameters.min_building_spacing.toFixed(1) : '5.0'} m
                     </div>
                 </div>
             </div>
 
-            {/* Warnings */}
+            {/* Validation Warnings and Errors */}
+            {validationInfo && backendConnected && (
+                <>
+                    {validationInfo.errors && validationInfo.errors.length > 0 && (
+                        <div style={{
+                            fontSize: '11px',
+                            color: '#F44336',
+                            backgroundColor: '#ffebee',
+                            padding: '6px',
+                            borderRadius: '4px',
+                            marginTop: '8px',
+                            border: '1px solid #ffcdd2'
+                        }}>
+                            <strong>❌ Errors:</strong><br />
+                            {validationInfo.errors.map((error, index) => (
+                                <div key={index}>• {error}</div>
+                            ))}
+                        </div>
+                    )}
+
+                    {validationInfo.warnings && validationInfo.warnings.length > 0 && (
+                        <div style={{
+                            fontSize: '11px',
+                            color: '#FF9800',
+                            backgroundColor: '#fff3e0',
+                            padding: '6px',
+                            borderRadius: '4px',
+                            marginTop: '8px',
+                            border: '1px solid #ffcc02'
+                        }}>
+                            <strong>⚠️ Warnings:</strong><br />
+                            {validationInfo.warnings.map((warning, index) => (
+                                <div key={index}>• {warning}</div>
+                            ))}
+                        </div>
+                    )}
+                </>
+            )}
+
+            {/* Density-specific Warnings */}
             {value > 0.8 && (
                 <div style={{
                     fontSize: '11px',
@@ -187,31 +369,17 @@ export default function Density({ polylineController, addCallback, removeCallbac
                 </div>
             )}
 
-            {geometryInfo && !geometryInfo.is_closed && (
+            {value < 0.2 && geometryInfo && geometryInfo.area > 10000 && (
                 <div style={{
                     fontSize: '11px',
-                    color: '#FF9800',
-                    backgroundColor: '#fff3e0',
+                    color: '#2196F3',
+                    backgroundColor: '#e3f2fd',
                     padding: '6px',
                     borderRadius: '4px',
                     marginTop: '8px',
-                    border: '1px solid #ffcc02'
+                    border: '1px solid #90caf9'
                 }}>
-                    ⚠️ Polygon is not closed - results may be unexpected
-                </div>
-            )}
-
-            {geometryInfo && geometryInfo.self_intersects && (
-                <div style={{
-                    fontSize: '11px',
-                    color: '#F44336',
-                    backgroundColor: '#ffebee',
-                    padding: '6px',
-                    borderRadius: '4px',
-                    marginTop: '8px',
-                    border: '1px solid #ffcdd2'
-                }}>
-                    ❌ Polygon self-intersects - please fix geometry first
+                    ℹ️ Low density on large site - consider increasing for better land use
                 </div>
             )}
         </div>

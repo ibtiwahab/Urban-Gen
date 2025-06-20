@@ -6,9 +6,14 @@ import GeneratedPlan from './GeneratedPlan/Controller';
 import GeneratePlanOption from '../../Popup/Options/GeneratePlan';
 import GeneratedPlanParameters from './GeneratedPlan/Parameters';
 import GeneratedPlanSettingsMenuComponent from './Settings/Menus/GeneratedPlan/Component';
+import GeometryService from '../../Services/GeometryService';
 
 export default class Polyline extends Base {
     static DEFAULT_LINE_COLOR = "green";
+    static VALID_COLOR = "green";
+    static WARNING_COLOR = "orange";
+    static ERROR_COLOR = "red";
+    static ANALYZING_COLOR = "blue";
 
     constructor(line, settingsComponent) {
         line.material = new THREE.LineBasicMaterial({ color: Polyline.DEFAULT_LINE_COLOR });
@@ -16,6 +21,9 @@ export default class Polyline extends Base {
         this._line = line;
         this._generatedPlanController = null;
         this._geometryCache = null;
+        this._validationCache = null;
+        this._offsetLines = []; // Store offset visualization lines
+        this._isAnalyzing = false;
         
         // Analyze geometry when polyline is created
         this.analyzeGeometry();
@@ -28,38 +36,40 @@ export default class Polyline extends Base {
     }
 
     async analyzeGeometry() {
+        if (this._isAnalyzing) return this._geometryCache;
+        
+        this._isAnalyzing = true;
+        this.highlight(Polyline.ANALYZING_COLOR);
+
         try {
             const flattenedVertices = this.getFlattenedVertices();
             
             if (flattenedVertices.length < 9) {
                 console.warn('Insufficient vertices for geometry analysis');
+                this.unhighlight();
+                this._isAnalyzing = false;
                 return {};
             }
 
-            const response = await fetch('http://localhost:8000/api/geometry/analyze/', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                },
-                body: JSON.stringify({ 
-                    vertices: flattenedVertices,
-                    operation: 'analyze'
-                })
-            });
+            // Validate vertices
+            GeometryService.validateVertices(flattenedVertices);
 
-            if (!response.ok) {
-                throw new Error(`Geometry analysis failed: ${response.status}`);
-            }
-
-            const result = await response.json();
+            // Perform comprehensive geometry analysis
+            const result = await GeometryService.analyzeGeometry(flattenedVertices, 'analyze');
             this._geometryCache = result;
             
             console.log('Geometry analysis result:', result);
+            
+            // Update visual feedback based on analysis
+            this.updateVisualFeedback(result);
+            
+            this._isAnalyzing = false;
             return result;
             
         } catch (error) {
             console.error('Geometry analysis failed:', error);
+            this.highlight(Polyline.ERROR_COLOR);
+            this._isAnalyzing = false;
             return {};
         }
     }
@@ -67,89 +77,149 @@ export default class Polyline extends Base {
     async validateGeometry() {
         try {
             const flattenedVertices = this.getFlattenedVertices();
+            GeometryService.validateVertices(flattenedVertices);
 
-            const response = await fetch('http://localhost:8000/api/geometry/analyze/', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                },
-                body: JSON.stringify({ 
-                    vertices: flattenedVertices,
-                    operation: 'validate'
-                })
+            const result = await GeometryService.validateGeometry(flattenedVertices, {
+                tolerance: 1e-6,
+                check_closure: true,
+                check_self_intersection: true,
+                check_planarity: true
             });
 
-            if (!response.ok) {
-                throw new Error(`Geometry validation failed: ${response.status}`);
-            }
-
-            const result = await response.json();
+            this._validationCache = result;
             console.log('Geometry validation result:', result);
             
-            // Update line color based on validation
-            if (result.self_intersects) {
-                this.highlight('red');
-                console.warn('Polygon self-intersects!');
-            } else if (!result.is_closed) {
-                this.highlight('orange');
-                console.warn('Polygon is not closed');
-            } else {
-                this.unhighlight();
-            }
+            // Update visual feedback
+            this.updateVisualFeedback(result);
             
             return result;
             
         } catch (error) {
             console.error('Geometry validation failed:', error);
-            return {};
+            this.highlight(Polyline.ERROR_COLOR);
+            return { is_valid: false, errors: [error.message] };
         }
     }
 
-    async createOffset(offsetDistance) {
+    updateVisualFeedback(geometryInfo) {
+        if (!geometryInfo) {
+            this.unhighlight();
+            return;
+        }
+
+        // Priority: Errors > Warnings > Valid
+        if (geometryInfo.self_intersects || (geometryInfo.errors && geometryInfo.errors.length > 0)) {
+            this.highlight(Polyline.ERROR_COLOR);
+        } else if (!geometryInfo.is_closed || (geometryInfo.warnings && geometryInfo.warnings.length > 0)) {
+            this.highlight(Polyline.WARNING_COLOR);
+        } else if (geometryInfo.is_valid) {
+            this.highlight(Polyline.VALID_COLOR);
+        } else {
+            this.unhighlight();
+        }
+    }
+
+    async createOffset(offsetDistance, offsetType = 'inward') {
         try {
             const flattenedVertices = this.getFlattenedVertices();
+            GeometryService.validateVertices(flattenedVertices);
 
-            const response = await fetch('http://localhost:8000/api/geometry/analyze/', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                },
-                body: JSON.stringify({ 
-                    vertices: flattenedVertices,
-                    operation: 'offset',
-                    offset_distance: offsetDistance
-                })
+            const result = await GeometryService.createOffset(flattenedVertices, offsetDistance, {
+                offset_type: offsetType,
+                tolerance: 1e-6
             });
 
-            if (!response.ok) {
-                throw new Error(`Geometry offset failed: ${response.status}`);
-            }
-
-            const result = await response.json();
-            
-            if (result.offset_vertices && result.offset_vertices.length >= 9) {
+            if (result.success && result.offset_vertices && result.offset_vertices.length >= 9) {
                 // Create new THREE.Line from offset vertices
                 const offsetGeometry = new THREE.BufferGeometry();
                 const positions = new Float32Array(result.offset_vertices);
                 offsetGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
                 
                 const offsetMaterial = new THREE.LineBasicMaterial({ 
-                    color: 'blue',
+                    color: offsetType === 'inward' ? 'blue' : 'purple',
                     linewidth: 2 
                 });
                 
                 const offsetLine = new THREE.Line(offsetGeometry, offsetMaterial);
-                console.log('Created offset polyline');
+                
+                // Store offset line for cleanup
+                this._offsetLines.push(offsetLine);
+                
+                console.log(`Created ${offsetType} offset polyline with distance ${offsetDistance}`);
                 return offsetLine;
+            } else {
+                console.warn('Offset operation failed:', result.error_message);
+                return null;
             }
-            
-            return null;
             
         } catch (error) {
             console.error('Geometry offset failed:', error);
             return null;
+        }
+    }
+
+    async testIntersectionWith(otherPolyline) {
+        try {
+            const verticesA = this.getFlattenedVertices();
+            const verticesB = otherPolyline.getFlattenedVertices();
+            
+            GeometryService.validateVertices(verticesA);
+            GeometryService.validateVertices(verticesB);
+
+            const result = await GeometryService.testIntersection(verticesA, verticesB, {
+                tolerance: 1e-6
+            });
+
+            console.log('Intersection test result:', result);
+            return result;
+            
+        } catch (error) {
+            console.error('Intersection test failed:', error);
+            return { intersects: false, intersection_type: 'error' };
+        }
+    }
+
+    async triangulate() {
+        try {
+            const flattenedVertices = this.getFlattenedVertices();
+            GeometryService.validateVertices(flattenedVertices);
+
+            const result = await GeometryService.triangulatePolygon(flattenedVertices, {
+                tolerance: 1e-6
+            });
+
+            if (result.success && result.triangles) {
+                console.log(`Polygon triangulated into ${result.triangle_count} triangles`);
+                
+                // Create THREE.js objects for each triangle
+                const triangleObjects = [];
+                for (const triangle of result.triangles) {
+                    if (triangle.length >= 9) {
+                        const geometry = new THREE.BufferGeometry();
+                        const positions = new Float32Array(triangle);
+                        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                        
+                        const material = new THREE.MeshBasicMaterial({ 
+                            color: 'lightblue', 
+                            side: THREE.DoubleSide,
+                            transparent: true,
+                            opacity: 0.7
+                        });
+                        
+                        const mesh = new THREE.Mesh(geometry, material);
+                        triangleObjects.push(mesh);
+                    }
+                }
+                
+                return triangleObjects;
+            } else {
+                console.warn('Triangulation failed:', result.error_message);
+                return [];
+            }
+            
+        } catch (error) {
+            console.error('Triangulation failed:', error);
+            return [];
         }
     }
 
@@ -167,47 +237,35 @@ export default class Polyline extends Base {
             throw new Error('Cannot generate plan: polygon self-intersects. Please fix the geometry first.');
         }
 
-        // Updated to call Django backend with enhanced error handling
-        const response = await fetch('http://localhost:8000/api/main/generateplan/', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify({ 
-                plan_flattened_vertices: flattenedVertices, 
-                plan_parameters: generatedPlanParameters 
-            })
-        });
-
-        if (!response.ok) {
-            let errorMessage = `HTTP error! status: ${response.status}`;
-
-            try {
-                const errorData = await response.json();
-                
-                if (errorData && errorData.error) {
-                    errorMessage = `Error ${response.status}: ${errorData.error}`;
-                    if (errorData.details) {
-                        errorMessage += ` - ${JSON.stringify(errorData.details)}`;
-                    }
-                } else if (errorData && errorData.message) {
-                    errorMessage = `Error ${response.status}: ${errorData.message}`;
-                }
-            } catch (parseError) {
-                console.error('Failed to parse error response:', parseError);
-                
-                if (response.status === 0 || !response.status) {
-                    errorMessage = 'Unable to connect to Django backend. Please ensure the server is running on http://localhost:8000';
-                }
-            }
-
-            throw new Error(errorMessage);
+        if (!validation.is_valid) {
+            const errorMsg = validation.errors ? validation.errors.join(', ') : 'Invalid geometry';
+            throw new Error(`Cannot generate plan: ${errorMsg}`);
         }
 
-        const result = await response.json();
-        console.log('Django backend response:', result);
-        return result;
+        // Show warning for non-closed polygons but allow generation
+        if (!validation.is_closed) {
+            console.warn('Warning: Polygon is not closed. Results may be unexpected.');
+        }
+
+        try {
+            // Use GeometryService for plan generation
+            const result = await GeometryService.generatePlan(flattenedVertices, generatedPlanParameters);
+            console.log('Django backend response:', result);
+            return result;
+        } catch (error) {
+            // Enhanced error handling
+            let errorMessage = error.message;
+            
+            if (errorMessage.includes('self-intersects')) {
+                errorMessage += '\n\nGeometry Issue: The polygon intersects itself. Please redraw without crossing lines.';
+            } else if (errorMessage.includes('Insufficient vertices')) {
+                errorMessage += '\n\nGeometry Issue: Need at least 3 points to create a valid polygon.';
+            } else if (errorMessage.includes('Unable to connect') || errorMessage.includes('timeout')) {
+                errorMessage += '\n\nConnection Issue: Please check that the Django server is running on http://localhost:8000';
+            }
+            
+            throw new Error(errorMessage);
+        }
     }
 
     get polyline() {
@@ -220,6 +278,10 @@ export default class Polyline extends Base {
 
     get geometryInfo() {
         return this._geometryCache;
+    }
+
+    get validationInfo() {
+        return this._validationCache;
     }
 
     getPopupOptions() {
@@ -239,6 +301,18 @@ export default class Polyline extends Base {
 
     unhighlight() {
         this._line.material = new THREE.LineBasicMaterial({ color: Polyline.DEFAULT_LINE_COLOR });
+    }
+
+    // Clean up offset lines
+    cleanupOffsetLines() {
+        for (const offsetLine of this._offsetLines) {
+            if (offsetLine.parent) {
+                offsetLine.parent.remove(offsetLine);
+            }
+            offsetLine.geometry.dispose();
+            offsetLine.material.dispose();
+        }
+        this._offsetLines = [];
     }
 
     generatePlan(addCallback, removeCallback) {
@@ -373,19 +447,7 @@ export default class Polyline extends Base {
             
         }).catch(error => {
             console.error('Plan generation failed:', error);
-            
-            // Show user-friendly error message with geometry hints
-            let errorMessage = `Plan generation failed: ${error.message}`;
-            
-            if (error.message.includes('self-intersects')) {
-                errorMessage += '\n\nGeometry Issue: The polygon intersects itself. Please redraw without crossing lines.';
-            } else if (error.message.includes('Insufficient vertices')) {
-                errorMessage += '\n\nGeometry Issue: Need at least 3 points to create a valid polygon.';
-            } else if (error.message.includes('Unable to connect')) {
-                errorMessage += '\n\nConnection Issue: Please check that the Django server is running on http://localhost:8000';
-            }
-            
-            alert(errorMessage);
+            alert(error.message);
         });
     }
 
@@ -419,24 +481,53 @@ export default class Polyline extends Base {
     }
 
     isValidGeometry() {
-        return this._geometryCache?.is_valid || false;
+        return this._validationCache?.is_valid || false;
     }
 
     isClosed() {
-        return this._geometryCache?.is_closed || false;
+        return this._validationCache?.is_closed || false;
     }
 
     hasSelfIntersections() {
-        return this._geometryCache?.self_intersects || false;
+        return this._validationCache?.self_intersects || false;
     }
 
     getMainOrientation() {
         return this._geometryCache?.main_orientation || 0;
     }
 
+    getGeometryQuality() {
+        if (!this._validationCache) return 0;
+        return GeometryService.getGeometryQualityScore(this._validationCache);
+    }
+
+    getGeometryStatus() {
+        if (!this._validationCache) return 'Unknown';
+        return GeometryService.getGeometryStatusDescription(this._validationCache);
+    }
+
+    getFormattedArea() {
+        return GeometryService.formatArea(this.getArea());
+    }
+
+    getFormattedPerimeter() {
+        return GeometryService.formatDistance(this.getPerimeter());
+    }
+
     // Method to refresh geometry analysis
     async refreshGeometryAnalysis() {
+        this._geometryCache = null;
+        this._validationCache = null;
         await this.analyzeGeometry();
         await this.validateGeometry();
+    }
+
+    // Cleanup method
+    dispose() {
+        this.cleanupOffsetLines();
+        if (this._line) {
+            if (this._line.geometry) this._line.geometry.dispose();
+            if (this._line.material) this._line.material.dispose();
+        }
     }
 }

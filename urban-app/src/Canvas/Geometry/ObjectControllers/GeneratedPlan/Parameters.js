@@ -19,6 +19,14 @@ export default class Parameters {
         this.auto_fix_intersections = false;
         this.min_polygon_area = 100.0;
 
+        // New geometry-specific parameters
+        this.geometry_tolerance = 1e-6;
+        this.check_self_intersection = true;
+        this.check_closure = true;
+        this.check_planarity = true;
+        this.offset_type = 'inward';
+        this.corner_style = 'sharp';
+
         // Set default values based on site type
         this.updateDefaultsForSiteType();
     }
@@ -54,6 +62,19 @@ export default class Parameters {
         this.orientation = orientation;
     }
 
+    // Enhanced geometry validation settings
+    setGeometryValidation(validate) {
+        this.validate_geometry = validate;
+    }
+
+    setAutoFixIntersections(autoFix) {
+        this.auto_fix_intersections = autoFix;
+    }
+
+    setGeometryTolerance(tolerance) {
+        this.geometry_tolerance = Math.max(1e-10, Math.min(1e-3, tolerance));
+    }
+
     updateDefaultsForSiteType() {
         switch (this.site_type) {
             case 0: // Residential
@@ -62,6 +83,7 @@ export default class Parameters {
                 this.building_style = 0;
                 this.min_building_spacing = 8.0;
                 this.setback_distance = 5.0;
+                this.geometry_tolerance = 1e-6;
                 break;
             case 1: // Commercial
                 this.density = 0.6;
@@ -69,6 +91,7 @@ export default class Parameters {
                 this.building_style = 2;
                 this.min_building_spacing = 5.0;
                 this.setback_distance = 3.0;
+                this.geometry_tolerance = 1e-6;
                 break;
             case 2: // Office
                 this.density = 0.5;
@@ -76,6 +99,7 @@ export default class Parameters {
                 this.building_style = 1;
                 this.min_building_spacing = 6.0;
                 this.setback_distance = 4.0;
+                this.geometry_tolerance = 5e-7;
                 break;
             case 3: // Mixed Use
                 this.density = 0.7;
@@ -83,6 +107,7 @@ export default class Parameters {
                 this.building_style = 3;
                 this.min_building_spacing = 5.0;
                 this.setback_distance = 3.5;
+                this.geometry_tolerance = 1e-6;
                 break;
             case 4: // Industrial
                 this.density = 0.4;
@@ -90,6 +115,7 @@ export default class Parameters {
                 this.building_style = 1;
                 this.min_building_spacing = 15.0;
                 this.setback_distance = 8.0;
+                this.geometry_tolerance = 1e-5;
                 break;
         }
     }
@@ -123,6 +149,14 @@ export default class Parameters {
         if (this.far > 2.0) {
             this.setback_distance = Math.max(this.setback_distance, 4.0);
         }
+
+        // Adjust tolerance based on site scale
+        const siteScale = this.min_building_spacing * 10; // Approximate site scale
+        if (siteScale > 1000) {
+            this.geometry_tolerance = 1e-5;
+        } else if (siteScale < 100) {
+            this.geometry_tolerance = 1e-7;
+        }
     }
 
     getLayoutStrategy() {
@@ -145,6 +179,18 @@ export default class Parameters {
         };
     }
 
+    getGeometryParameters() {
+        return {
+            tolerance: this.geometry_tolerance,
+            validate_geometry: this.validate_geometry,
+            check_self_intersection: this.check_self_intersection,
+            check_closure: this.check_closure,
+            check_planarity: this.check_planarity,
+            auto_fix_intersections: this.auto_fix_intersections,
+            min_polygon_area: this.min_polygon_area
+        };
+    }
+
     getFloorHeight() {
         const heights = {
             0: 3.0,   // Residential
@@ -164,7 +210,9 @@ export default class Parameters {
             this.building_style >= 0 && this.building_style <= 3 &&
             this.orientation >= 0 && this.orientation < 180 &&
             this.min_building_spacing > 0 &&
-            this.setback_distance >= 0
+            this.setback_distance >= 0 &&
+            this.geometry_tolerance > 0 &&
+            this.min_polygon_area >= 0
         );
     }
 
@@ -183,7 +231,13 @@ export default class Parameters {
             respect_site_constraints: this.respect_site_constraints,
             validate_geometry: this.validate_geometry,
             auto_fix_intersections: this.auto_fix_intersections,
-            min_polygon_area: this.min_polygon_area
+            min_polygon_area: this.min_polygon_area,
+            geometry_tolerance: this.geometry_tolerance,
+            check_self_intersection: this.check_self_intersection,
+            check_closure: this.check_closure,
+            check_planarity: this.check_planarity,
+            offset_type: this.offset_type,
+            corner_style: this.corner_style
         };
     }
 
@@ -219,6 +273,24 @@ export default class Parameters {
         if (data.min_polygon_area !== undefined) {
             this.min_polygon_area = Math.max(0, data.min_polygon_area);
         }
+        if (data.geometry_tolerance !== undefined) {
+            this.geometry_tolerance = Math.max(1e-10, Math.min(1e-3, data.geometry_tolerance));
+        }
+        if (data.check_self_intersection !== undefined) {
+            this.check_self_intersection = Boolean(data.check_self_intersection);
+        }
+        if (data.check_closure !== undefined) {
+            this.check_closure = Boolean(data.check_closure);
+        }
+        if (data.check_planarity !== undefined) {
+            this.check_planarity = Boolean(data.check_planarity);
+        }
+        if (data.offset_type !== undefined) {
+            this.offset_type = data.offset_type;
+        }
+        if (data.corner_style !== undefined) {
+            this.corner_style = data.corner_style;
+        }
     }
 
     clone() {
@@ -233,5 +305,16 @@ export default class Parameters {
         
         return `${siteTypes[this.site_type]} site with ${buildingStyles[this.building_style]} buildings, ` +
                `${(this.density * 100).toFixed(0)}% density, FAR ${this.far.toFixed(1)}`;
+    }
+
+    getGeometryStatus() {
+        const validationItems = [];
+        if (this.validate_geometry) validationItems.push('Validation');
+        if (this.check_self_intersection) validationItems.push('Self-intersection check');
+        if (this.check_closure) validationItems.push('Closure check');
+        if (this.check_planarity) validationItems.push('Planarity check');
+        if (this.auto_fix_intersections) validationItems.push('Auto-fix');
+        
+        return validationItems.length > 0 ? validationItems.join(', ') : 'No validation';
     }
 }
